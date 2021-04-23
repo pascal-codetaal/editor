@@ -25,12 +25,13 @@ import ModalSurvey from './ModalSurvey'
 import ModalDebug from './ModalDebug'
 
 import { downloadGlyphsMetadata, downloadSpriteMetadata } from '../libs/metadata'
-import {latest, validate} from '@mapbox/mapbox-gl-style-spec'
+import { latest, validate } from '@mapbox/mapbox-gl-style-spec'
 import style from '../libs/style'
 import { initialStyleUrl, loadStyleUrl, removeStyleQuerystring } from '../libs/urlopen'
 import { undoMessages, redoMessages } from '../libs/diffmessage'
 import { StyleStore } from '../libs/stylestore'
-import { ApiStyleStore } from '../libs/apistore'
+// import { ApiStyleStore } from '../libs/apistore'
+import { ApiStyleStore } from '../libs/geocore.apistore'
 import { RevisionStore } from '../libs/revisions'
 import LayerWatcher from '../libs/layerwatcher'
 import tokens from '../config/tokens.json'
@@ -38,14 +39,15 @@ import isEqual from 'lodash.isequal'
 import Debug from '../libs/debug'
 import queryUtil from '../libs/query-util'
 import {formatLayerId} from '../util/format';
+import axios from "axios";
 
 import MapboxGl from 'mapbox-gl'
 
 
 // Similar functionality as <https://github.com/mapbox/mapbox-gl-js/blob/7e30aadf5177486c2cfa14fe1790c60e217b5e56/src/util/mapbox.js>
-function normalizeSourceURL (url, apiToken="") {
+function normalizeSourceURL(url, apiToken = "") {
   const matches = url.match(/^mapbox:\/\/(.*)/);
-  if (matches) {
+  if(matches) {
     // mapbox://mapbox.mapbox-streets-v7
     return `https://api.mapbox.com/v4/${matches[1]}.json?secure&access_token=${apiToken}`
   }
@@ -64,9 +66,9 @@ function setFetchAccessToken(url, mapStyle) {
       return url.replace('{key}', accessToken)
     }
   }
-  else if (matchesThunderforest) {
+  else if(matchesThunderforest) {
     const accessToken = style.getAccessToken("thunderforest", mapStyle, {allowFallback: true})
-    if (accessToken) {
+    if(accessToken) {
       return url.replace('{key}', accessToken)
     }
   }
@@ -102,6 +104,9 @@ export default class App extends React.Component {
     this.styleStore = new ApiStyleStore({
       onLocalStyleChange: mapStyle => this.onStyleChanged(mapStyle, {save: false}),
       port: port,
+      apiUrl: params.get("apiUrl"),
+      token: params.get("token"),
+      layerId: params.get("layerId"),
       host: params.get("localhost")
     })
 
@@ -348,6 +353,7 @@ export default class App extends React.Component {
         }
         foundLayers.set(layer.id, true);
       });
+      console.log(foundLayers)
     }
 
     const mappedErrors = layerErrors.concat(errors).map(error => {
@@ -576,7 +582,27 @@ export default class App extends React.Component {
   fetchSources() {
     const sourceList = {};
 
-    for(let [key, val] of Object.entries(this.state.mapStyle.sources)) {
+    /**
+     * const sourceList = {};
+    const sources = Object.keys(this.state.mapStyle.sources).reduce((acc, item) => {
+      acc[item] = {
+        type: "vector",
+        layers: []
+      }
+      acc[item].layers = this.state.mapStyle.layers.filter((it) => it.source === item).reduce((accum, it) => {
+        if(!accum.includes(it["source-layer"])) {
+          accum.push(it["source-layer"])
+        }
+        return accum
+      }, [])
+      return acc
+    }, {});
+    console.log(sources)
+    this.setState({
+      sources: sources
+    });
+     */
+    for (let [key, val] of Object.entries(this.state.mapStyle.sources)) {
       if(
         !this.state.sources.hasOwnProperty(key) &&
         val.type === "vector" &&
@@ -587,46 +613,79 @@ export default class App extends React.Component {
           layers: []
         };
 
-        let url = val.url;
+        /* let url = val.url;
         try {
           url = normalizeSourceURL(url, MapboxGl.accessToken);
-        } catch(err) {
+        } catch (err) {
           console.warn("Failed to normalizeSourceURL: ", err);
         }
 
         try {
           url = setFetchAccessToken(url, this.state.mapStyle)
-        } catch(err) {
+        } catch (err) {
           console.warn("Failed to setFetchAccessToken: ", err);
-        }
+        } */
+        const params = new URLSearchParams(window.location.search.substring(1))
+        const apiUrl = params.get("apiUrl");
+        const layerId = params.get("layerId");
 
-        fetch(url, {
+        axios
+          .get(`${apiUrl}${layerId}/editor`)
+          .then(response => {
+            const { data: { data: json } } = response;
+            console.log("json")
+            console.log(json)
+            if(!json.hasOwnProperty("vector_layers")) {
+              return;
+            }
+
+            // Create new objects before setState
+            const sources = Object.assign({}, {
+              [key]: this.state.sources[key],
+            });
+
+            for (let layer of json.vector_layers) {
+              sources[key].layers.push(layer.id)
+            }
+
+            console.debug("Updating source: " + key);
+            console.log('sources', sources)
+            this.setState({
+              sources: sources
+            });
+            cb(null);
+          })
+          .catch(e => {
+            cb(new Error("Can not connect to style API"));
+          });
+        /* fetch(url, {
           mode: 'cors',
         })
-        .then(response => response.json())
-        .then(json => {
+          .then(response => response.json())
+          .then(json => {
 
-          if(!json.hasOwnProperty("vector_layers")) {
-            return;
-          }
+            if(!json.hasOwnProperty("vector_layers")) {
+              return;
+            }
 
-          // Create new objects before setState
-          const sources = Object.assign({}, {
-            [key]: this.state.sources[key],
-          });
+            // Create new objects before setState
+            const sources = Object.assign({}, {
+              [key]: this.state.sources[key],
+            });
 
-          for(let layer of json.vector_layers) {
-            sources[key].layers.push(layer.id)
-          }
+            for (let layer of json.vector_layers) {
+              sources[key].layers.push(layer.id)
+            }
 
-          console.debug("Updating source: "+key);
-          this.setState({
-            sources: sources
-          });
-        })
-        .catch(err => {
-          console.error("Failed to process sources for '%s'", url, err);
-        });
+            console.debug("Updating source: " + key);
+            console.log('sources', sources)
+            this.setState({
+              sources: sources
+            });
+          })
+          .catch(err => {
+            console.error("Failed to process sources for '%s'", url, err);
+          }); */
       }
       else {
         sourceList[key] = this.state.sources[key] || this.state.mapStyle.sources[key];
@@ -861,7 +920,7 @@ export default class App extends React.Component {
       layer={selectedLayer}
       layerIndex={this.state.selectedLayerIndex}
       isFirstLayer={this.state.selectedLayerIndex < 1}
-      isLastLayer={this.state.selectedLayerIndex === this.state.mapStyle.layers.length-1}
+      isLastLayer={this.state.selectedLayerIndex === this.state.mapStyle.layers.length - 1}
       sources={this.state.sources}
       vectorLayers={this.state.vectorLayers}
       spec={this.state.spec}
@@ -932,7 +991,7 @@ export default class App extends React.Component {
     </div>
 
     return <AppLayout
-      toolbar={toolbar}
+  /*     toolbar={toolbar} */
       layerList={layerList}
       layerEditor={layerEditor}
       map={this.mapRenderer()}
